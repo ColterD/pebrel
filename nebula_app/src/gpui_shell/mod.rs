@@ -167,6 +167,7 @@ pub fn run_shell(
             }
         },
         runtime_hub.clone(),
+        initial_command.is_some(),
     );
     if runtime_server.is_none()
         && initial_command.is_none()
@@ -198,7 +199,8 @@ pub fn run_shell(
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
-    if runtime_server.is_some() {
+    // An `-e` command process serves only its own panes; the mobile link stays with the owner.
+    if runtime_server.is_some() && initial_command.is_none() {
         crate::mobile_connection::resume_saved();
     }
     let _runtime_server = runtime_server;

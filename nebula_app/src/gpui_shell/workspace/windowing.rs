@@ -314,6 +314,7 @@ pub(crate) fn open_initial_window(
     shell_id: Option<String>,
 ) {
     if !crate::platform::elevation::requires_isolation()
+        && initial_command.is_none()
         && let Some(sessions) = crate::update_download::handoff::restore_ticket()
     {
         let mut sessions = sessions.into_iter();
@@ -341,6 +342,9 @@ pub(crate) fn open_initial_window(
             }
             return;
         }
+    }
+    if initial_command.is_some() {
+        cx.global_mut::<WindowRegistry>().session_persistence.isolate();
     }
     let startup = if shell_id.is_some() {
         match runtime_window_startup(initial_cwd, shell_id.as_deref()) {
@@ -1427,6 +1431,10 @@ fn save_combined_session(cx: &mut App, clean: bool) -> std::io::Result<()> {
     let session = combined_session(None, cx);
     let reason = if clean { SaveReason::Quit } else { SaveReason::Checkpoint };
     cx.global_mut::<WindowRegistry>().session_persistence.save(session, reason)
+}
+
+pub(super) fn session_isolated(cx: &App) -> bool {
+    cx.global::<WindowRegistry>().session_persistence.is_isolated()
 }
 
 pub(super) fn save_current_window_session(
