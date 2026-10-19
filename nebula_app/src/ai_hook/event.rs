@@ -95,7 +95,7 @@ pub fn capabilities_for(source: &str) -> AiHookCapabilities {
             bridge_sequence: false,
             serialized_delivery: false,
         },
-        "kimi" | "copilot" | "grok" => AiHookCapabilities {
+        "kimi" | "copilot" | "grok" | "hermes" => AiHookCapabilities {
             lifecycle: true,
             attention_events: true,
             attention_context: true,

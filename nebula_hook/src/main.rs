@@ -212,7 +212,16 @@ fn read_payload(mut reader: impl Read) -> std::io::Result<Option<Vec<u8>>> {
 fn known_source(source: &str) -> bool {
     matches!(
         source,
-        "claude" | "codex" | "opencode" | "pi" | "kimi" | "omp" | "copilot" | "grok" | "cursor"
+        "claude"
+            | "codex"
+            | "opencode"
+            | "pi"
+            | "kimi"
+            | "omp"
+            | "copilot"
+            | "grok"
+            | "cursor"
+            | "hermes"
     )
 }
 
@@ -221,7 +230,7 @@ fn known_source(source: &str) -> bool {
 /// 无论如何都抽干管道（约束 1：未读的管道会在 CLI 侧变成 hook write error）。
 /// 其余 CLI 把载荷追加为末位参数。
 fn payload_on_stdin(source: &str) -> bool {
-    matches!(source, "claude" | "kimi" | "copilot" | "grok" | "cursor")
+    matches!(source, "claude" | "kimi" | "copilot" | "grok" | "cursor" | "hermes")
 }
 
 fn native_event(args: &[String]) -> Option<&str> {
@@ -429,6 +438,8 @@ mod tests {
         assert!(!super::known_source("kimi-code"), "白名单只认精确的 source 名");
         assert!(super::payload_on_stdin("claude"));
         assert!(super::payload_on_stdin("kimi"));
+        assert!(super::known_source("hermes"));
+        assert!(super::payload_on_stdin("hermes"));
         for source in ["codex", "opencode", "pi"] {
             assert!(!super::payload_on_stdin(source), "{source} 的载荷在末位参数");
         }
