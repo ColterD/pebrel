@@ -62,7 +62,7 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     // 写法，把它的 session id 当成 claude 的，就会把一个不存在的会话交给
     // `claude --resume`（见 nebula_hook 的 FOREIGN_HOOK_RUNNERS 注释）。
     let session_id_keys: &[&str] = match source.as_str() {
-        "claude" | "kimi" => &["session_id"],
+        "claude" | "kimi" | "hermes" => &["session_id"],
         "codex" if native_codex => &["session_id"],
         "codex" => &["thread-id"],
         "cursor" => &["conversation_id", "session_id"],
@@ -191,6 +191,31 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
             Some("SessionEnd") => (AiHookKind::SessionEnd, None),
             _ => return None,
         },
+        // Hermes shell hooks write `{hook_event_name, session_id, cwd, extra}` to
+        // stdin; event-specific fields such as `prompt` live under `extra`.
+        // `on_session_end` ends every turn, including failed and interrupted ones.
+        // `on_session_start` is not mapped: delegated child agents fire it in the
+        // same process with their own session id, which would take over the pane.
+        // `on_session_reset` starts the session instead: only the CLI/TUI session
+        // boundary (`/new`) fires it, after `on_session_finalize`, with the new id.
+        // Streaming, API and transform hooks are not lifecycle events.
+        "hermes" => match payload.get("hook_event_name").and_then(Value::as_str) {
+            Some("pre_llm_call") => (AiHookKind::PromptSubmit, None),
+            Some("post_tool_call") | Some("on_human_input_resolved") => {
+                (AiHookKind::ToolComplete, None)
+            },
+            Some("on_human_input_request") => (
+                AiHookKind::NeedsAttention,
+                payload
+                    .get("extra")
+                    .and_then(|extra| context_string(extra, &["prompt"]))
+                    .map(|prompt| truncate(&prompt, MESSAGE_MAX_CHARS)),
+            ),
+            Some("on_session_end") => (AiHookKind::TurnDone, None),
+            Some("on_session_reset") => (AiHookKind::SessionStart, None),
+            Some("on_session_finalize") => (AiHookKind::SessionEnd, None),
+            _ => return None,
+        },
         // opencode's Bun plugin normalizes its event bus into a tiny
         // `{"kind":"prompt|done|attention","message":?}` payload (see the
         // embedded plugin in `ensure_opencode_plugin`), so this side stays
@@ -241,6 +266,16 @@ pub(super) fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
             // finished turn, not a truncated one, so it must not raise a failure.
             Some("toolUse") => AiTurnOutcome::Succeeded,
             None if !payload.as_object()?.contains_key("stop_reason") => AiTurnOutcome::Unspecified,
+            _ => AiTurnOutcome::Unknown,
+        }
+    } else if source == "hermes" && kind == AiHookKind::TurnDone {
+        let extra = payload.get("extra");
+        let flag = |name: &str| extra.and_then(|extra| extra.get(name)).and_then(Value::as_bool);
+        match (flag("interrupted"), flag("failed"), flag("completed")) {
+            (Some(true), _, _) => AiTurnOutcome::Cancelled,
+            (_, Some(true), _) => AiTurnOutcome::Failed,
+            (_, _, Some(true)) => AiTurnOutcome::Succeeded,
+            // A turn that ended without completing, failing or being interrupted.
             _ => AiTurnOutcome::Unknown,
         }
     } else {

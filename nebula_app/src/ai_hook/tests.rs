@@ -2,7 +2,9 @@
 use super::ordering::AiHookEventGate;
 use super::payload::RAW_CONTEXT_MAX_BYTES;
 
-use super::{AiHookKind, GateVerdict, capabilities_for, parse_remote_envelope, reorder_batch};
+use super::{
+    AiHookKind, AiTurnOutcome, GateVerdict, capabilities_for, parse_remote_envelope, reorder_batch,
+};
 
 #[test]
 fn remote_envelope_uses_local_pane_identity() {
@@ -512,6 +514,64 @@ fn kimi_permission_result_resumes_a_blocked_stream() {
     assert!(gate.accept(&event("PermissionRequest"), 4));
     assert!(gate.accept(&event("PermissionResult"), 4), "Blocked must resume working");
     assert!(gate.accept(&event("Stop"), 4));
+}
+
+#[test]
+fn hermes_events_map_to_the_shared_lifecycle() {
+    for (name, expected) in [
+        ("pre_llm_call", AiHookKind::PromptSubmit),
+        ("post_tool_call", AiHookKind::ToolComplete),
+        ("on_human_input_request", AiHookKind::NeedsAttention),
+        ("on_human_input_resolved", AiHookKind::ToolComplete),
+        ("on_session_end", AiHookKind::TurnDone),
+        ("on_session_reset", AiHookKind::SessionStart),
+        ("on_session_finalize", AiHookKind::SessionEnd),
+    ] {
+        let raw = format!(
+            "nebula-hook/1 source=hermes pane=5\n{{\"hook_event_name\":\"{name}\",\"session_id\":\"h-1\",\"cwd\":\"/work\"}}"
+        );
+        let event = parse_remote_envelope(raw.as_bytes(), Some(5)).unwrap();
+        assert_eq!(event.kind, expected, "{name}");
+        assert_eq!(event.session_id.as_deref(), Some("h-1"), "{name}");
+    }
+    // The turn outcome comes from `extra`; interruption wins, and a turn with no
+    // flag set stays unknown. A missing session id stays unknown too.
+    for (extra, expected) in [
+        (r#"{"completed":true,"failed":false,"interrupted":false}"#, AiTurnOutcome::Succeeded),
+        (r#"{"completed":false,"failed":true,"interrupted":false}"#, AiTurnOutcome::Failed),
+        (r#"{"completed":false,"failed":false,"interrupted":true}"#, AiTurnOutcome::Cancelled),
+        (r#"{"completed":false,"interrupted":true,"reason":"shutdown"}"#, AiTurnOutcome::Cancelled),
+        (r#"{"completed":false,"failed":false,"interrupted":false}"#, AiTurnOutcome::Unknown),
+    ] {
+        let raw = format!(
+            "nebula-hook/1 source=hermes pane=5\n{{\"hook_event_name\":\"on_session_end\",\"session_id\":\"\",\"extra\":{extra}}}"
+        );
+        let event = parse_remote_envelope(raw.as_bytes(), Some(5)).unwrap();
+        assert_eq!(event.kind, AiHookKind::TurnDone, "{extra}");
+        assert_eq!(event.turn_outcome, expected, "{extra}");
+        assert_eq!(event.session_id, None);
+    }
+    // A wait shows Hermes's (already redacted) prompt and the pane's directory.
+    let raw = b"nebula-hook/1 source=hermes pane=5\n{\"hook_event_name\":\"on_human_input_request\",\"session_id\":\"h-1\",\"cwd\":\"/work\",\"extra\":{\"kind\":\"approval\",\"prompt\":\"rm -rf build\"}}";
+    let event = parse_remote_envelope(raw, Some(5)).unwrap();
+    assert_eq!(event.kind, AiHookKind::NeedsAttention);
+    assert_eq!(event.message.as_deref(), Some("rm -rf build"));
+    assert_eq!(event.attention.as_ref().unwrap().cwd.as_deref(), Some("/work"));
+    // Per-token and per-request observers would only produce noise.
+    // `on_session_start` also comes from delegated child agents in the same process.
+    for name in [
+        "on_session_start",
+        "on_stream_delta",
+        "pre_api_request",
+        "post_llm_call",
+        "transform_llm_output",
+    ] {
+        let raw = format!("nebula-hook/1 source=hermes pane=5\n{{\"hook_event_name\":\"{name}\"}}");
+        assert!(parse_remote_envelope(raw.as_bytes(), Some(5)).is_none(), "{name} must be dropped");
+    }
+    let capabilities = capabilities_for("hermes");
+    assert!(capabilities.lifecycle && capabilities.attention_events);
+    assert!(capabilities.attention_context);
 }
 
 #[test]

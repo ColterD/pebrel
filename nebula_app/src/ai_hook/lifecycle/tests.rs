@@ -300,3 +300,38 @@ fn shell_command_end_rejects_late_hooks_until_a_new_command_starts() {
     activity.begin_command(true);
     assert!(activity.apply_hook(&event("codex", "new", "notify")));
 }
+
+fn hermes(session: &str, name: &str) -> AiHookEvent {
+    let mut event = event("hermes", session, name);
+    event.agent_pid = Some(30);
+    event
+}
+
+#[test]
+fn hermes_delegated_children_cannot_finish_the_parent_turn() {
+    let mut activity = AgentActivity::default();
+    assert!(activity.apply_hook(&hermes("h-1", "pre_llm_call")));
+    for name in ["pre_llm_call", "on_session_end"] {
+        assert!(!activity.apply_hook(&hermes("h-2", name)), "child {name}");
+        assert_eq!(activity.status(), AgentStatus::Working);
+    }
+    assert!(activity.apply_hook(&hermes("h-1", "on_session_end")));
+    assert_eq!(activity.status(), AgentStatus::Done);
+}
+
+#[test]
+fn hermes_new_session_is_tracked_after_the_old_one_finalizes() {
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&hermes("h-1", "pre_llm_call"));
+    activity.apply_hook(&hermes("h-1", "on_session_end"));
+    assert!(activity.apply_hook(&hermes("h-1", "on_session_finalize")));
+    assert_eq!(activity.status(), AgentStatus::Unknown);
+    assert!(!activity.apply_hook(&hermes("h-2", "pre_llm_call")), "finalize ends tracking");
+    assert!(activity.apply_hook(&hermes("h-2", "on_session_reset")));
+    assert_eq!(activity.status(), AgentStatus::Idle);
+    assert!(activity.apply_hook(&hermes("h-2", "pre_llm_call")));
+    assert_eq!(activity.status(), AgentStatus::Working);
+    assert!(!activity.apply_hook(&hermes("h-1", "on_session_end")), "late old-session event");
+    assert!(activity.apply_hook(&hermes("h-2", "on_session_end")));
+    assert_eq!(activity.status(), AgentStatus::Done);
+}
