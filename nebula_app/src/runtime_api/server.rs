@@ -31,6 +31,11 @@ fn parse_endpoint(data: &str) -> Option<Endpoint> {
     Some(Endpoint { port, token: token.to_owned() })
 }
 
+/// Where an owner publishes its endpoint; isolated and elevated servers publish nothing.
+fn discovery_path(isolated: bool) -> Option<PathBuf> {
+    (!isolated && !crate::platform::elevation::requires_isolation()).then(port_file)
+}
+
 fn port_file() -> PathBuf {
     crate::display::nebula_data_dir().join("runtime.port")
 }
@@ -178,23 +183,21 @@ pub struct RuntimeServer {
 impl RuntimeServer {
     #[cfg(feature = "legacy-shell")]
     pub fn spawn(proxy: EventLoopProxy<Event>, hub: RuntimeHub) -> Option<Self> {
-        Self::spawn_with_sink(EventSink::Winit(proxy), hub)
+        Self::spawn_with_sink(EventSink::Winit(proxy), hub, false)
     }
 
-    /// GPUI variant of [`Self::spawn`], delivered through a callback.
+    /// GPUI variant of [`Self::spawn`], delivered through a callback. An `isolated`
+    /// server (an `-e` command process) serves only its own panes, like an elevated one.
     pub fn spawn_callback(
         on_event: impl Fn(RuntimeCallback) + Send + Sync + 'static,
         hub: RuntimeHub,
+        isolated: bool,
     ) -> Option<Self> {
-        Self::spawn_with_sink(EventSink::Callback(Arc::new(on_event)), hub)
+        Self::spawn_with_sink(EventSink::Callback(Arc::new(on_event)), hub, isolated)
     }
 
-    fn spawn_with_sink(sink: EventSink, hub: RuntimeHub) -> Option<Self> {
-        Self::spawn_at(
-            sink,
-            hub,
-            (!crate::platform::elevation::requires_isolation()).then(port_file),
-        )
+    fn spawn_with_sink(sink: EventSink, hub: RuntimeHub, isolated: bool) -> Option<Self> {
+        Self::spawn_at(sink, hub, discovery_path(isolated))
     }
 
     fn spawn_at(sink: EventSink, hub: RuntimeHub, path: Option<PathBuf>) -> Option<Self> {
@@ -285,6 +288,15 @@ mod tests {
         ] {
             assert!(parse_endpoint(invalid).is_none());
         }
+    }
+
+    #[test]
+    fn isolated_servers_never_publish_discovery() {
+        assert_eq!(discovery_path(true), None);
+        assert_eq!(
+            discovery_path(false).is_some(),
+            !crate::platform::elevation::requires_isolation()
+        );
     }
 
     #[test]

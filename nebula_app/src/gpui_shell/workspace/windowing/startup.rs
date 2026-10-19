@@ -55,6 +55,29 @@ mod startup_tests {
         assert!(cx.update(|cx| cx.windows().is_empty()));
     }
 
+    /// `pebrel -e` starts the process through `open_initial_window` with a command; that
+    /// process must not write the shared session or stay resident (#B).
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn command_launch_isolates_the_process_from_the_saved_workspace(cx: &mut gpui::TestAppContext) {
+        super::super::transfer_tests::initialize_test(cx);
+        let (_ai, ai_events) = std::sync::mpsc::channel();
+        let (_shell, shell_events) = std::sync::mpsc::channel();
+        let command = crate::config::ui_config::Program::Just("pebrel-test-missing-command".into());
+        cx.update(|cx| {
+            super::super::open_initial_window(
+                cx,
+                ai_events,
+                shell_events,
+                None,
+                Some(command),
+                None,
+            )
+        });
+        // `save_with` and `keep_session_on_close` both read this flag.
+        assert!(cx.update(|cx| super::super::session_isolated(cx)));
+    }
+
     #[test]
     fn default_runtime_startup_keeps_the_requested_directory() {
         let cwd = Some(PathBuf::from("project"));
