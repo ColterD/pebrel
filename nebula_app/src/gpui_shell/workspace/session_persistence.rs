@@ -35,6 +35,15 @@ impl SessionPersistence {
             .into_update_windows()
     }
 
+    /// A process started for one command (`-e`) is isolated like an administrator window.
+    pub(super) fn isolate(&mut self) {
+        self.isolated = true;
+    }
+
+    pub(super) fn is_isolated(&self) -> bool {
+        self.isolated
+    }
+
     pub(super) fn cancel_quit(&mut self) {
         self.quitting = false;
     }
@@ -53,8 +62,8 @@ impl SessionPersistence {
         reason: SaveReason,
         write: impl FnOnce(&Session) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
-        // An administrator window must not overwrite the ordinary workspace or
-        // cause its privileged shell command to be restored in a later session.
+        // An administrator window or `-e` command process must not overwrite the
+        // ordinary workspace or cause its shell command to be restored in a later session.
         if self.isolated {
             return Ok(());
         }
@@ -105,7 +114,9 @@ mod tests {
 
     #[test]
     fn isolated_windows_never_write_shared_session_storage() {
-        let mut state = SessionPersistence { isolated: true, ..SessionPersistence::default() };
+        let mut state = ordinary_window();
+        state.isolate();
+        assert!(state.is_isolated());
         for reason in [
             SaveReason::Checkpoint,
             SaveReason::TabsClosed,
