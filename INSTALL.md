@@ -184,7 +184,9 @@ directory.
   when no Pebrel configuration is present; see the discovery order in the
   [Lua guide](docs/lua-configuration.md#discovery-order).
 - Linux uses `$XDG_CONFIG_HOME/pebrel/pebrel.lua` (normally
-  `~/.config/pebrel/pebrel.lua`); macOS uses
+  `~/.config/pebrel/pebrel.lua`). The AppImage also keeps a copy of
+  `pebrel-hook` in `appimage/` there, so agent hooks still work after Pebrel
+  quits; `pebrel setup-ai --remove` deletes it. macOS uses
   `~/Library/Application Support/Pebrel/pebrel.lua`. Native package and runtime
   acceptance requirements are described in the Preview sections above.
 - Visual settings remain available in the in-app settings panel.
