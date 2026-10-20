@@ -18,6 +18,21 @@ pub(crate) fn resident_launch_directory(
         .and_then(|path| std::path::absolute(path).ok())
 }
 
+/// The executable runs inside the AppImage `image`, mounted at `appdir` for this process only.
+pub(crate) fn in_appimage_mount(
+    executable: &std::path::Path,
+    image: Option<&std::path::Path>,
+    appdir: Option<&std::path::Path>,
+) -> bool {
+    let (Some(image), Some(appdir)) = (image, appdir) else { return false };
+    image.is_absolute()
+        && image.is_file()
+        && std::fs::canonicalize(executable)
+            .ok()
+            .zip(std::fs::canonicalize(appdir).ok())
+            .is_some_and(|(executable, root)| executable.starts_with(root))
+}
+
 #[cfg(windows)]
 mod console;
 #[cfg(feature = "gpui-shell")]

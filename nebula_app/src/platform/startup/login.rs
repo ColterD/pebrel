@@ -40,13 +40,8 @@ pub(super) fn set_enabled(enabled: bool) -> io::Result<()> {
 
 fn linux_launcher(executable: &Path, image: Option<&Path>, appdir: Option<&Path>) -> PathBuf {
     // AppImage 的挂载路径只对本次进程有效；登录项必须指向原始包。
-    if let (Some(image), Some(appdir)) = (image, appdir)
-        && image.is_absolute()
-        && image.is_file()
-        && std::fs::canonicalize(executable)
-            .ok()
-            .zip(std::fs::canonicalize(appdir).ok())
-            .is_some_and(|(executable, root)| executable.starts_with(root))
+    if super::in_appimage_mount(executable, image, appdir)
+        && let Some(image) = image
     {
         return image.to_owned();
     }

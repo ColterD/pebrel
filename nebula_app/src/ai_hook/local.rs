@@ -1,6 +1,7 @@
 //! Native provider configuration policy, shared by all desktop platforms.
 use super::bridges::{OPENCODE_PLUGIN_JS, PI_EXTENSION_TS};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
@@ -299,6 +300,15 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
         }
     }
     if remove {
+        let dir = durable_dir();
+        match remove_durable_helper(&dir) {
+            Ok(true) => println!("已移除 AppImage Hook 辅助程序副本（{}）。", dir.display()),
+            Ok(false) => {},
+            Err(error) => {
+                eprintln!("移除 AppImage Hook 辅助程序副本失败：{error}");
+                failed = true;
+            },
+        }
         for (agent, path) in runtime_skill_candidates() {
             match remove_runtime_skill(&path) {
                 Ok(ManagedSkillRemoval::Removed) => {
@@ -477,7 +487,7 @@ static HELPER_MISSING_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn helper_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let helper = helper_path_from_exe(&exe);
+    let helper = helper_path_from_exe(&exe).map(|helper| durable_helper(&exe, helper));
     match helper {
         Some(path) => {
             // Permit a later installation/removal to be reported once on
@@ -496,28 +506,112 @@ pub(super) fn helper_path() -> Option<PathBuf> {
     }
 }
 
+/// An AppImage runs from a per-launch mount (`$APPDIR`, e.g. `/tmp/.mount_PebrelXXXX`)
+/// that disappears when Pebrel exits, so agent configs get a copy of the helper in
+/// `durable_dir()` instead. Each process refreshes it once if the bytes differ.
+fn durable_helper(exe: &Path, helper: PathBuf) -> PathBuf {
+    static DURABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let durable = DURABLE.get_or_init(|| {
+        let (image, appdir) = (std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR"));
+        let (image, appdir) = (image.as_deref().map(Path::new), appdir.as_deref().map(Path::new));
+        durable_copy(exe, &helper, image, appdir, &durable_dir())
+    });
+    match durable {
+        Some(copy) if runnable(copy) => copy.clone(),
+        // `setup-ai --remove` may delete the copy while this process runs.
+        Some(_) => copy_helper(&helper, &durable_dir()).unwrap_or(helper),
+        None => helper,
+    }
+}
+
+/// Not `runtime/`: a portable config directory can be the executable's own directory, whose
+/// `runtime/` holds the bundled helper.
+fn durable_dir() -> PathBuf {
+    crate::platform::dirs::data_dir().join("appimage")
+}
+
+/// `setup-ai --remove` deletes the AppImage helper copy, then the directory if it is empty.
+fn remove_durable_helper(dir: &Path) -> std::io::Result<bool> {
+    let mut removed = false;
+    for name in helper_names() {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
+    Ok(removed)
+}
+
+/// Inside the AppImage mount, the helper copied to `runtime`, or else a runnable
+/// copy an earlier launch left there. `None` keeps the bundled path.
+fn durable_copy(
+    exe: &Path,
+    helper: &Path,
+    image: Option<&Path>,
+    appdir: Option<&Path>,
+    runtime: &Path,
+) -> Option<PathBuf> {
+    if !crate::platform::startup::in_appimage_mount(exe, image, appdir) {
+        return None;
+    }
+    copy_helper(helper, runtime)
+        .inspect_err(|error| {
+            log::warn!("ai_hook: cannot copy hook helper out of the AppImage: {error}")
+        })
+        .ok()
+        .or_else(|| helper.file_name().map(|name| runtime.join(name)).filter(|copy| runnable(copy)))
+}
+
+fn copy_helper(helper: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    let name = helper.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let target = dir.join(name);
+    // A size mismatch (a different helper version) skips reading both files.
+    if runnable(&target)
+        && std::fs::metadata(&target)?.len() == std::fs::metadata(helper)?.len()
+        && std::fs::read(&target)? == std::fs::read(helper)?
+    {
+        return Ok(target);
+    }
+    std::fs::create_dir_all(dir)?;
+    let staged = dir.join(format!(".{}.nebula-tmp-{}", name.to_string_lossy(), std::process::id()));
+    // `fs::copy` also copies the bundled helper's permission bits.
+    let result =
+        std::fs::copy(helper, &staged).and_then(|_| crate::atomic_file::replace(&staged, &target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result.map(|()| target)
+}
+
+/// A regular file the hook runner can execute.
+fn runnable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else { return false };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // 打包漏掉执行位时不能写入永远无法运行的 Hook。
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    true
+}
+
+fn helper_names() -> [String; 2] {
+    ["pebrel-hook", "nebula-hook"].map(|stem| format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+}
+
 fn helper_path_from_exe(exe: &Path) -> Option<PathBuf> {
     let exe_dir = exe.parent()?;
     // 新包优先使用分类目录，旧同目录位置仅用于开发构建和兼容历史包。
-    let names = ["pebrel-hook", "nebula-hook"]
-        .map(|stem| format!("{stem}{}", std::env::consts::EXE_SUFFIX));
-    names
+    helper_names()
         .into_iter()
         .flat_map(|name| [exe_dir.join("runtime").join(&name), exe_dir.join(name)])
-        .find(|path| {
-            let Ok(metadata) = path.metadata() else { return false };
-            if !metadata.is_file() {
-                return false;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                // 打包漏掉执行位时不能写入永远无法运行的 Hook。
-                metadata.permissions().mode() & 0o111 != 0
-            }
-            #[cfg(not(unix))]
-            true
-        })
+        .find(|path| runnable(path))
 }
 
 /// The hook entry's `command`: nothing but the helper's absolute path.
@@ -764,7 +858,7 @@ mod setup_announcement_tests {
 
 #[cfg(test)]
 mod runtime_asset_tests {
-    use super::helper_path_from_exe;
+    use super::{copy_helper, durable_copy, helper_path_from_exe, remove_durable_helper, runnable};
 
     fn name(stem: &str) -> String {
         format!("{stem}{}", std::env::consts::EXE_SUFFIX)
@@ -800,6 +894,68 @@ mod runtime_asset_tests {
         helper(&legacy);
 
         assert_eq!(helper_path_from_exe(&exe), Some(legacy));
+    }
+
+    #[test]
+    fn appimage_helper_copy_is_runnable_and_follows_updates() {
+        let mount = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let bundled = mount.path().join(name("pebrel-hook"));
+        helper(&bundled);
+        let runtime = data.path().join("runtime");
+
+        let copy = copy_helper(&bundled, &runtime).unwrap();
+        assert_eq!(copy, runtime.join(name("pebrel-hook")));
+        assert!(runnable(&copy));
+
+        std::fs::write(&bundled, b"updated helper").unwrap();
+        assert_eq!(copy_helper(&bundled, &runtime).unwrap(), copy);
+        assert_eq!(std::fs::read(&copy).unwrap(), b"updated helper");
+        assert!(runnable(&copy), "a refreshed copy keeps its exec bit");
+        assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 1, "no staging file is left");
+
+        // An unusable data directory is an error, so the caller keeps the bundled path.
+        let blocked = data.path().join("not-a-directory");
+        std::fs::write(&blocked, b"file").unwrap();
+        assert!(copy_helper(&bundled, &blocked.join("runtime")).is_err());
+    }
+
+    #[test]
+    fn appimage_hook_helper_resolves_outside_the_mount() {
+        let mount = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let bin = mount.path().join("usr/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let (exe, bundled) = (bin.join(name("pebrel")), bin.join(name("pebrel-hook")));
+        helper(&exe);
+        helper(&bundled);
+        let image = data.path().join("Pebrel.AppImage");
+        std::fs::write(&image, b"image").unwrap();
+        let runtime = data.path().join("runtime");
+        let (image, appdir) = (Some(image.as_path()), Some(mount.path()));
+
+        let copy = durable_copy(&exe, &bundled, image, appdir, &runtime).unwrap();
+        assert_eq!(copy, runtime.join(name("pebrel-hook")));
+        assert!(!copy.starts_with(mount.path()), "agent configs must not name the mount");
+        // Outside an AppImage the bundled path stays.
+        assert_eq!(durable_copy(&exe, &bundled, None, appdir, &runtime), None);
+        // An unreadable bundled helper falls back to the copy from an earlier launch.
+        std::fs::remove_file(&bundled).unwrap();
+        assert_eq!(durable_copy(&exe, &bundled, image, appdir, &runtime), Some(copy));
+    }
+
+    #[test]
+    fn setup_ai_remove_deletes_the_appimage_helper_copy() {
+        let mount = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let bundled = mount.path().join(name("pebrel-hook"));
+        helper(&bundled);
+        let runtime = data.path().join("runtime");
+        copy_helper(&bundled, &runtime).unwrap();
+
+        assert!(remove_durable_helper(&runtime).unwrap());
+        assert!(!runtime.exists(), "the emptied directory goes too");
+        assert!(!remove_durable_helper(&runtime).unwrap(), "nothing to remove is not an error");
     }
 
     #[cfg(unix)]
