@@ -13,6 +13,6 @@
   "dependencies": {
     "qrcode": "1.5.4",
     "selfsigned": "2.4.1",
-    "ws": "8.18.3"
+    "ws": "8.21.0"
   }
 }
